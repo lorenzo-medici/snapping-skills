@@ -15,7 +15,7 @@ description: >
 license: "Apache-2.0"
 metadata:
   author: "Canonical"
-  version: "2.1.5"
+  version: "2.2.0"
   summary: "Docker/OCI image URL, tarball, or rootfs → snap with extraction, analysis, recipe patching, and confinement validation."
   tags:
     - snap
@@ -191,8 +191,31 @@ Ask the user for the following. Do not assume values for required parameters.
    Default: same as application name. Only ask if service discovery hostname
    should differ.
 
-6. **`--do-not-daemonize`**: Flag (no value). Ask if the application should run
-   interactively rather than as a background daemon.
+6. **`--do-not-daemonize`**: Flag (no value). Decide based on the application's
+   runtime model — **do not blindly ask the user to pick.** Classify the
+   application first, then confirm your conclusion:
+
+   - **Long-lived application → daemon (omit `--do-not-daemonize`).** If the
+     application runs continuously — a server, listener, broker, scheduler,
+     watcher, or a stage in a data pipeline that stays up consuming/producing a
+     stream — it must be a daemon so systemd supervises and restarts it. This is
+     the default; omit the flag.
+   - **Run-to-completion application → not a daemon (pass `--do-not-daemonize`).**
+     If the application is meant to be invoked, do some work, return a value or
+     produce output, and then exit (a CLI tool, batch/one-shot job, converter,
+     query/report generator, or interactive command), it must **not** be a
+     daemon — a daemon that exits immediately is treated as a crash-looping
+     failure by systemd. Pass `--do-not-daemonize`.
+
+   Use the signals available before extraction to classify: the image's purpose
+   and name, the user's description of how it is invoked, documented usage of the
+   upstream image (e.g. `nginx`/`postgres` = daemon; a `*-cli`, `*-tools`, or
+   `convert`/`report` image = run-to-completion), and whether the entrypoint
+   blocks (listens on a port, loops) or returns. After Phase 1 parses
+   `config.json`, re-check `process.args[0]` against this classification and, if
+   it contradicts the choice made here, re-run `docker-to-snap` with the
+   corrected flag. State your classification and reasoning to the user, and only
+   ask them to confirm if the runtime model is genuinely ambiguous.
 
 7. **`--envvars`**: Path to a `KEY=value` environment variables file. Ask if the
    application requires environment configuration.

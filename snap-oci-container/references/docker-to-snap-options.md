@@ -42,7 +42,24 @@ Offer these as optional; skip unless the user mentions them:
 |---|---|---|
 | OCI image tag | `--oci-image-tag <tag>` | Default: `latest`. Only relevant if tarball is already in OCI archive format |
 | Environment variables file | `--envvars <file>` | File of `KEY=value` pairs to embed in the snap recipe |
-| Do not daemonize | `--do-not-daemonize` | Flag only (no value). Makes the snap non-daemon; useful for interactive/debug apps |
+| Do not daemonize | `--do-not-daemonize` | Flag only (no value). Makes the snap a **run-to-completion app** instead of a daemon. See the decision rule below — pass it for run-to-completion apps, omit it for long-lived apps. |
+
+---
+
+## Daemon vs. run-to-completion decision
+
+`docker-to-snap` makes the snap a **daemon** by default (systemd-supervised,
+auto-restarted). Choose based on the application's runtime model:
+
+| Application runtime model | Examples | Flag |
+|---|---|---|
+| **Long-lived** — runs continuously, stays up | web/API server, database, message broker, scheduler, watcher, a streaming stage in a data pipeline | **Omit** `--do-not-daemonize` (daemon — default) |
+| **Run-to-completion** — invoked, does work, returns a value/output, then exits | CLI tool, batch/one-shot job, file converter, query/report generator, interactive command | **Pass** `--do-not-daemonize` |
+
+A run-to-completion app packaged as a daemon will be treated by systemd as a
+crash-looping failure (it exits immediately), so this distinction matters.
+Classify from the image purpose/name, the entrypoint behaviour (blocks/listens
+vs. returns), and upstream documentation before invoking the tool.
 
 ---
 
@@ -144,7 +161,7 @@ python3 <skill-dir>/scripts/download_image.py \
   --suppress-build
 ```
 
-**Non-daemon (interactive/debug) application:**
+**Run-to-completion (CLI / one-shot / interactive) application:**
 ```bash
 ./docker-to-snap \
   --tarball myapp_1.2.3.tar \

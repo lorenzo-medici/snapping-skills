@@ -231,6 +231,8 @@ the refresh path in addition to fresh install.
 
 ## Phase 4: Verify & Harden
 
+Classic confinement should never be used. Always aim for strict confinement.
+
 Read `references/install-and-verify.md` → "Confinement Iteration Workflow" and
 "Runtime Verification" for full commands.
 

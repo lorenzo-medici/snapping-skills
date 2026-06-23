@@ -671,6 +671,8 @@ Confirm:
 
 #### 5.3 — Strict confinement iteration loop
 
+Classic confinement should never be used.
+
 Follow `snap-iteration-workflow` **Phase 4 (Verify & Harden)** — "Confinement hardening loop".
 
 > **All snap install and test commands run inside the LXD test container, never on the host.**

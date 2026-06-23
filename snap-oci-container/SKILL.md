@@ -206,6 +206,7 @@ Ask the user for the following. Do not assume values for required parameters.
      query/report generator, or interactive command), it must **not** be a
      daemon — a daemon that exits immediately is treated as a crash-looping
      failure by systemd. Pass `--do-not-daemonize`.
+     If the application is not "daemonized", the restart logic should be removed from the hooks.
 
    Use the signals available before extraction to classify: the image's purpose
    and name, the user's description of how it is invoked, documented usage of the

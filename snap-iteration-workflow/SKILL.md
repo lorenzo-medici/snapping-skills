@@ -219,6 +219,7 @@ Modify files in `prime/` directly (wrapper scripts, environment files) and resta
 Do not modify an extracted container `rootfs/` directly; keep it read-only and
 make reproducible fixes through snapcraft overrides or wrapper changes.
 Note: install and remove hooks do **not** run with `snap try`.
+If the application is not "daemonized", the restart logic should be removed from the hooks.
 
 ### Test the refresh path
 

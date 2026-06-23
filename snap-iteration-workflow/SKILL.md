@@ -185,6 +185,8 @@ When the build produces a `.snap` file, proceed to Phase 3.
 
 ## Phase 3: Install & Run
 
+When working with LXD for testing, volumes should not be used, only `lxc push` and `lxc pull`.
+
 Read `references/install-and-verify.md` for full installation and environment setup commands.
 
 ### First run: devmode

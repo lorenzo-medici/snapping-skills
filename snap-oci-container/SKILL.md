@@ -602,6 +602,8 @@ rebuild a second time to confirm the snap still works from a clean rootfs.
 
 ### Phase 5 — Build, install, and iterative confinement validation
 
+When working with LXD for testing, volumes should not be used, only `lxc push` and `lxc pull`.
+
 Invoke the `snap-iteration-workflow` skill to build the snap and validate it at runtime.
 Pass it the `snapcraft.yaml` path, the project directory, and the `target_arch`
 derived from OCI metadata as context. Instruct it that every build command must

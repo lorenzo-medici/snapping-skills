@@ -23,20 +23,40 @@ counterparts.
   `usr/bin/library_wrapper.sh`. No manual change needed if using the template.
 - Watch for `stage collision` build errors where a part installs into `bin/`
   but the `bin → usr/bin` symlink is already in the stage directory.
+- **`env-exporter-bash` part staging collision:** The `env-exporter-bash` part
+  must stage its script to `usr/bin/env-exporter.sh` (not `bin/env-exporter.sh`)
+  and the `command-chain:` must reference `usr/bin/env-exporter.sh`. On a
+  merged-/usr image, `bin/` is a symlink staged by the `oci-container` part;
+  staging a file into `bin/` from a different part creates a type conflict
+  (symlink vs directory) that fails the build with:
+  > `Parts 'oci-container' and 'env-exporter-bash' list the following files,
+  > but with different contents or permissions: bin`
+
+  The `docker-to-snap` template already uses `usr/bin/env-exporter.sh`; verify
+  the generated `snapcraft.yaml` uses this path if you customise the template.
 
 ---
 
 ## 1c.2 — glibc version compatibility check
 
 When the OCI image's glibc version differs from the base snap's glibc version,
-setting `LD_LIBRARY_PATH` in `snapcraft.yaml` `environment:` blocks is
-**dangerous and must be avoided entirely**.
+a subtle but fatal issue arises: **snapcraft automatically injects
+`LD_LIBRARY_PATH` into `meta/snap.yaml`** pointing at the OCI image's libraries,
+even when you never set it in `environment:`.
 
-**Why:** The base snap shell (`/bin/sh` from core26/core24) inherits
-`LD_LIBRARY_PATH`. When a C binary calls `popen()` or `system()`, it forks the
-base snap's `/bin/sh` with the inherited library path. If the OCI image's glibc
-is older than the base snap's, the base shell will crash immediately with
-`GLIBC_X.Y not found` (SIGSEGV).
+**Why this is dangerous:** The base snap shells (`/bin/sh`, `/bin/bash` from
+core26/core24) run under this injected `LD_LIBRARY_PATH`. Everything that uses
+these shells will crash with `GLIBC_X.Y not found` (SIGSEGV):
+- Install/post-refresh/remove/configure **hooks** — `snapd` runs them with the
+  base snap's `/bin/sh`, which inherits the injected path.
+- **command-chain scripts** such as `env-exporter.sh` that have a `#!/bin/bash`
+  shebang — also run under the base snap's bash.
+- C binaries that call `popen()` or `system()` — these fork the base snap's
+  `/bin/sh` at runtime.
+
+**This means:** a snap using the `docker-to-snap` template with a glibc-mismatched
+OCI image will fail at install time (`snap install`) with a confusing error:
+> `run hook "install": /bin/sh: /snap/.../lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.XX' not found`
 
 ```bash
 # Check OCI image glibc version
@@ -48,12 +68,28 @@ strings /lib/x86_64-linux-gnu/libc.so.6 2>/dev/null \
   | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1
 ```
 
-**If versions differ:**
-- **Never** add `LD_LIBRARY_PATH` to any `environment:` block in `snapcraft.yaml`
-  (not global, not per-app, not in hooks).
-- The `embed_rpath.sh` build step embeds RPATH directly into ELF executables,
-  making `LD_LIBRARY_PATH` unnecessary. Ensure this step is present in the
-  `override-build` section (it is included in the template after `patch_interpreter.sh`).
-- See `references/override-steps-guide.md §2` for the ET_EXEC-only RPATH rule.
+**If versions differ — two-part fix:**
 
-The `docker-to-snap` script runs this check automatically and prints a warning.
+1. **Neutralise the auto-injected `LD_LIBRARY_PATH`** by explicitly setting it
+   to empty in the global `environment:` block of `snapcraft.yaml`:
+   ```yaml
+   environment:
+     LD_LIBRARY_PATH: ""
+     env_alias: entrypoint
+   ```
+   The `docker-to-snap` generator detects a glibc mismatch and emits this line
+   automatically. Do not remove it. Do not set any other value for
+   `LD_LIBRARY_PATH` in global or per-app `environment:` blocks.
+
+2. **Embed RPATH into all ELF executables** using the `embed_rpath.sh` build
+   step, so the OCI app can find its own libraries without `LD_LIBRARY_PATH`.
+   This step is included in the template's `override-build:` after
+   `patch_interpreter.sh`. See `references/override-steps-guide.md §2` for the
+   ET_EXEC-only RPATH rule.
+
+Together, (1) prevents the base-snap shell crash and (2) ensures the OCI
+application still finds its libraries.
+
+The `docker-to-snap` script runs the glibc check automatically, prints a warning,
+and injects `LD_LIBRARY_PATH: ""` into the generated `snapcraft.yaml` when a
+mismatch is detected.

@@ -15,7 +15,7 @@ description: >
 license: "Apache-2.0"
 metadata:
   author: "Canonical"
-  version: "2.2.0"
+  version: "2.3.0"
   summary: "Docker/OCI image URL, tarball, or rootfs → snap with extraction, analysis, recipe patching, and confinement validation."
   tags:
     - snap
@@ -201,12 +201,33 @@ Ask the user for the following. Do not assume values for required parameters.
      stream — it must be a daemon so systemd supervises and restarts it. This is
      the default; omit the flag.
    - **Run-to-completion application → not a daemon (pass `--do-not-daemonize`).**
-     If the application is meant to be invoked, do some work, return a value or
-     produce output, and then exit (a CLI tool, batch/one-shot job, converter,
-     query/report generator, or interactive command), it must **not** be a
-     daemon — a daemon that exits immediately is treated as a crash-looping
-     failure by systemd. Pass `--do-not-daemonize`.
-     If the application is not "daemonized", the restart logic should be removed from the hooks.
+      If the application is meant to be invoked, do some work, return a value or
+      produce output, and then exit (a CLI tool, batch/one-shot job, converter,
+      query/report generator, or interactive command), it must **not** be a
+      daemon — a daemon that exits immediately is treated as a crash-looping
+      failure by systemd. Pass `--do-not-daemonize`.
+
+      **Mandatory post-extraction check for `--do-not-daemonize`:** After
+      `docker-to-snap` completes, verify that the generated `configure` hook
+      contains **no** `snapctl restart` call. Since snapcraft 7+, the generator
+      automatically omits the restart line for non-daemon apps, but if you are
+      using an older generator or a customised template, confirm manually:
+      ```bash
+      grep -l "snapctl restart" snap/hooks/configure 2>/dev/null && \
+        echo "WARNING: restart logic present in configure hook — remove it"
+      ```
+      A `configure` hook that calls `snapctl restart` on a non-service snap will
+      fail at install time with `unknown service: "<snap>.entrypoint"`. The hook
+      itself should be kept (it runs validation logic and is part of the hooks
+      block needed for `/etc/hosts` advertisement via `network-control`); only the
+      `snapctl restart` line must be absent.
+
+      Hooks live outside the snapcraft parts system (in `snap/hooks/`), so any
+      change to a hook requires cleaning the whole project and deleting any stale
+      LXD build instance before the next build:
+      ```bash
+      snapcraft clean --use-lxd --build-for <target_arch>
+      ```
 
    Use the signals available before extraction to classify: the image's purpose
    and name, the user's description of how it is invoked, documented usage of the
@@ -269,6 +290,19 @@ Record:
 - `rootfs/` path
 - `snapcraft.yaml` path (present if docker-to-snap was run, or if pre-existing project)
 - app name(s) under `apps:` in `snapcraft.yaml` (needed for `--app` in Phase 4)
+
+**Verify `build_scripts/` was populated.** The `docker-to-snap` generator copies
+four build scripts into the project. If they are absent the snapcraft build will
+fail at the `override-build:` step with "file not found":
+
+```bash
+ls -1 build_scripts/*.sh 2>/dev/null || echo "WARNING: build_scripts/ not populated"
+```
+
+Expected files: `create_wrapper.sh`, `embed_rpath.sh`, `patch_interpreter.sh`,
+`replace_absolute_symlinks.sh`. If any are missing, verify that `/root/build_scripts/`
+(or the directory alongside the `docker-to-snap` binary) contains all four scripts,
+then re-run `docker-to-snap` with the same arguments.
 
 ---
 
@@ -671,6 +705,23 @@ Confirm:
 > part before rebuilding. Return to Phase 4b.3 to apply it and Phase 4b.4 to verify it.
 
 **Do not proceed to strict confinement until devmode confirms the application works.**
+
+> **Install iteration tip:** When iterating on hooks or snap metadata (not just
+> `snapcraft.yaml` parts), identical snap version numbers and revisions can cause
+> `snapd` to serve a cached snap. Always run `snap remove --purge <snap-name>`
+> inside the test container before reinstalling, and bump the `version` file when
+> iterating on hooks so the revision changes. This ensures `snapd` loads the new
+> package rather than resuming state from a prior revision.
+
+> **Non-TTY output capture:** In non-interactive shells (CI, remote sessions),
+> `lxc exec` writes its output to a pseudo-TTY which is then swallowed unless
+> captured explicitly. Use `script -qc` to force TTY allocation and capture output:
+> ```bash
+> script -qc "/snap/bin/lxc exec snap-test -- snap install --dangerous \
+>   --devmode /root/myapp.snap" /dev/null
+> ```
+> Alternatively pipe through `strace 2>&1` which creates its own PTY. The plain
+> `lxc exec ... > file` redirect will silently produce an empty file.
 
 #### 5.3 — Strict confinement iteration loop
 

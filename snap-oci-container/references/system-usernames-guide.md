@@ -202,30 +202,53 @@ present (which strict confinement denies).
 
 ### Writable directories
 
-Create writable directories with `<snap-user>:root` ownership and `770`
-permissions (allows both the dropped user and root within the snap to access):
+> **⚠️ AppArmor `CAP_CHOWN` restriction:** Under strict confinement the
+> AppArmor profile does **not** grant `CAP_CHOWN` for foreign UIDs. Root inside
+> the snap **cannot** `chown` files to `_daemon_` (or any other UID that differs
+> from root). `chown _daemon_:root "$DIR"` will silently fail or return
+> `Permission denied` even when called from the daemon wrapper running as root.
+> Do **not** use `chown` in snap wrapper scripts to grant access to a
+> system-username user.
+
+**Use `chmod` instead.** Root can always chmod files it owns — no capability
+required. Make directories group- and other-accessible so the privilege-dropped
+user can read and write them without a `chown`:
 
 ```bash
-# In a wrapper script or configure hook:
-DATA_DIR="$SNAP_DATA/myapp"
-if [ ! -d "$DATA_DIR" ]; then
-  mkdir -p "$DATA_DIR"
-  chmod 770 "$DATA_DIR"
-  chown _daemon_:root "$DATA_DIR"
-fi
+# In the launch wrapper (runs as root before setpriv drop):
+DATA_DIR="$SNAP_COMMON/myapp"
+mkdir -p "$DATA_DIR"
+# chmod lets _daemon_ traverse and write; chown would silently fail.
+chmod go+rwX "$DATA_DIR"   # grant group+other read/write/traverse
 ```
 
-Or in an `override-build` step to pre-create the directory structure:
+For a writable tree seeded from read-only snap defaults on first boot:
+```bash
+mkdir -p "$DATA_DIR" "$LOGS_DIR" "$CONF_DIR"
+chmod -R go+rwX "$DATA_DIR" "$LOGS_DIR" "$CONF_DIR"
+```
+
+> **Note:** `chmod go+rwX` grants access regardless of whether `_daemon_`'s GID
+> matches the file group. It relies on the snap sandbox (AppArmor + seccomp +
+> mount namespace) as the security boundary, which is the correct trust model
+> for strict confinement.
+
+If the OCI image ships config directories with mode `700` (root-only), patch
+them to at least `755` at build time so the dropped user can traverse them after
+the privilege drop:
+
 ```yaml
 override-build: |
   snapcraftctl build
-  install -d -m 770 $SNAPCRAFT_PART_INSTALL/var/lib/myapp
+  # Fix root-700 config dirs so _daemon_ can traverse them after privilege drop.
+  find $SNAPCRAFT_PART_INSTALL/etc/myapp -type d -exec chmod 755 {} \;
 ```
 
 ### Read-only files shipped in the snap
 
-These are owned by root and readable by all → no ownership change needed.
-The privilege-dropped user can read them normally.
+Files under `$SNAP` are owned by root. The privilege-dropped user can read them
+as long as the unix permissions include group/other read bits (mode `644`/`755`
+— the standard for files shipped in a snap). No ownership change is needed.
 
 ---
 

@@ -59,11 +59,14 @@ OCI image will fail at install time (`snap install`) with a confusing error:
 > `run hook "install": /bin/sh: /snap/.../lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.XX' not found`
 
 ```bash
-# Check OCI image glibc version
-strings rootfs/lib/x86_64-linux-gnu/libc.so.6 2>/dev/null \
-  | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1
+# Check OCI image glibc version (works on any architecture)
+find rootfs -name "libc.so.6" -not -type l 2>/dev/null | head -1 | \
+  xargs -I{} strings {} 2>/dev/null | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1
 
 # Check host / core26 base glibc version
+# Preferred: dpkg-query (works on all architectures on Ubuntu/Debian build hosts)
+dpkg-query --showformat='${Version}' --show libc6 2>/dev/null | sed 's/-[^-]*$//'
+# Fallback if dpkg-query is unavailable (x86-64 hosts only):
 strings /lib/x86_64-linux-gnu/libc.so.6 2>/dev/null \
   | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1
 ```
@@ -90,6 +93,11 @@ strings /lib/x86_64-linux-gnu/libc.so.6 2>/dev/null \
 Together, (1) prevents the base-snap shell crash and (2) ensures the OCI
 application still finds its libraries.
 
-The `docker-to-snap` script runs the glibc check automatically, prints a warning,
-and injects `LD_LIBRARY_PATH: ""` into the generated `snapcraft.yaml` when a
-mismatch is detected.
+The `docker-to-snap` script no longer attempts glibc version detection. The
+generated `snapcraft.yaml` always includes `LD_LIBRARY_PATH: ""` unconditionally —
+not only when a mismatch is detected — because the detection relied on host
+tooling (`dpkg-query`, `strings`) that may be absent or return incorrect results
+on non-Ubuntu or non-x86-64 build hosts. The unconditional setting is always safe:
+when glibc versions match it is a no-op; when they differ it prevents the crash.
+Combine it with the `embed_rpath.sh` build step to ensure ELF executables resolve
+their libraries via embedded RPATH and do not need `LD_LIBRARY_PATH` at all.

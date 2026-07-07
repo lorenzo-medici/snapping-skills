@@ -306,6 +306,66 @@ override-build: |
 
 ---
 
+### 7b. Staged OCI coreutils contaminating the build PATH
+
+**Situation:** The OCI image uses the coreutils-single multicall pattern, common
+on Amazon Linux 2023 and RHEL 9+. Each applet (`cp`, `mkdir`, `id`, …) is a
+tiny shebang script pointing at the coreutils binary:
+
+```
+#!/usr/bin/coreutils --coreutils-prog-shebang=cp
+```
+
+A `patch_coreutils_shebang.sh` `override-build` step rewrites those shebangs
+from `/usr/bin/coreutils` to `/snap/<name>/current/usr/bin/coreutils` so the
+OCI image's own coreutils binary (interpreter-patched and RPATH-embedded) is
+used at runtime. After `oci-container` is staged, the rewritten applets land in
+`$CRAFT_STAGE/usr/bin`. Snapcraft puts `$CRAFT_STAGE` on the build `PATH` for
+subsequent parts. When a later part's `override-build` calls `craftctl default`,
+the dump plugin resolves `cp --archive` via PATH and picks up the broken staged
+applet whose shebang now points at the not-yet-installed snap path. The build
+aborts with:
+
+```
+/root/stage/usr/bin/cp: /snap/<name>/current/usr/bin/coreutils:
+    bad interpreter: No such file or directory
+```
+
+**Manual change that would be wrong:** letting a local/auxiliary part use the
+default `craftctl default` after `oci-container` is staged.
+
+**Correct fix — use absolute host paths in `override-build` for auxiliary parts:**
+
+```yaml
+parts:
+  local-auxiliary:
+    plugin: dump
+    source: snap/local
+    organize:
+      myfile.sh: usr/bin/myfile.sh
+    stage:
+      - usr/bin/myfile.sh
+    override-build: |
+      # Do NOT use craftctl default here: it would resolve cp/install via PATH
+      # and pick up the staged OCI coreutils applets patched by
+      # patch_coreutils_shebang.sh, which point at a non-existent runtime path.
+      # Use absolute host paths to bypass PATH resolution entirely.
+      /bin/mkdir -p "$CRAFT_PART_INSTALL"
+      /bin/cp -a "$CRAFT_PART_SRC"/. "$CRAFT_PART_INSTALL"/
+```
+
+**Notes:**
+- Only affects parts built **after** `oci-container` is staged (the default
+  for parts without an explicit `after:` declaration).
+- Snapcraft's `organize:` and `stage:` lifecycle steps run independently of
+  `craftctl default` and fire correctly even when `craftctl default` is
+  replaced entirely.
+- Alternatively, declare `after: []` on the auxiliary part to build it before
+  `oci-container` is staged — but only when the auxiliary part's source does
+  not depend on OCI-staged content.
+
+---
+
 ### 8. Directory Creation
 
 **Situation:** The application expects a directory that does not exist in the

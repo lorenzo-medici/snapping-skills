@@ -53,6 +53,49 @@ configurable:
 - [ ] See `references/system-usernames-guide.md` for the complete decision tree,
   YAML syntax, and wrapper patterns.
 
+### Entrypoint script check (when `process.args[0]` is a shell script)
+
+Shell-based entrypoints often contain `export VAR=/hardcoded/path` lines that
+unconditionally overwrite values the snap launch wrapper sets — causing the
+wrapper's `$SNAP`/`$SNAP_COMMON` redirections to be silently discarded at
+runtime:
+
+```bash
+# Scan the entrypoint and any scripts it sources for hardcoded absolute exports
+entrypoint=$(jq -r '.process.args[0]' config.json | sed 's|^\./||')
+grep -nE '^export [A-Z_]+=/[a-z]' rootfs/$entrypoint 2>/dev/null
+# Also check scripts sourced by the entrypoint (e.g. opensearch-env, docker-entrypoint-initdb.d)
+find rootfs -name "*.sh" -exec grep -lE '^export [A-Z_]+=/[a-z]' {} \;
+```
+
+- [ ] For each hardcoded `export VAR=/path` found: record the variable name.
+- [ ] Add an `override-build` `sed` step (see `references/override-steps-guide.md §5`)
+  that rewrites `export VAR=/path` → `export VAR="${VAR:-/path}"` so a
+  pre-set value from the snap wrapper is honoured at runtime.
+
+### Verify the generated `library_wrapper.sh`
+
+After `docker-to-snap --suppress-build` completes, immediately inspect the
+generated wrapper to confirm the `ENTRYPOINT=` line resolves to a real path:
+
+```bash
+grep 'ENTRYPOINT=' <output-folder>/snap/local/library_wrapper.sh 2>/dev/null || \
+  grep 'ENTRYPOINT=' <output-folder>/usr/bin/library_wrapper.sh 2>/dev/null
+```
+
+- [ ] Confirm the resolved path exists inside `rootfs/`:
+  `ls rootfs/<resolved-path>`
+- [ ] If the path is wrong (e.g. a `/usr/local/bin/` fallback for an entrypoint
+  that lives elsewhere), replace `library_wrapper.sh` with a custom wrapper
+  that sets `ENTRYPOINT` directly to the correct `$SNAP/<real-path>`.
+
+> **Common cause of wrong resolution:** when `process.args[0]` is a
+> cwd-relative path like `./entrypoint.sh`, `create_wrapper.sh` searches the
+> container PATH and, if the script is not on PATH, falls back to the
+> `process.cwd` + entrypoint name. Verify the resulting path is the intended
+> one. Absolute `process.args[0]` values (starting with `/`) are always
+> resolved correctly.
+
 ---
 
 ## Phase 2 — Map capabilities to interfaces
@@ -130,6 +173,29 @@ strings rootfs/<real-binary-path> | grep -oE '[A-Z][A-Z0-9_]{3,}' | sort -u | he
 ```
 - [ ] Note env vars that configure file paths (e.g. `<APP>_CONFIG_PATH`, `<APP>_DATA_DIR`, `<APP>_TLS_CERT`).
 - [ ] These will need to be set in a wrapper script pointing into `$SNAP` or `$SNAP_COMMON`.
+
+### 4f. Inspect entrypoint and launch scripts for hardcoded path exports
+
+When `process.args[0]` is a shell script, it may contain `export VAR=/hardcoded/path`
+lines that run **after** the snap launch wrapper has already set the correct
+`$SNAP`/`$SNAP_COMMON` values — silently discarding them. These are invisible
+to `strings` on the ELF binary and require direct script inspection.
+
+```bash
+# Find shell scripts that export hardcoded absolute paths
+find rootfs -name "*.sh" -exec grep -lE '^export [A-Z_]+=/[a-z]' {} \;
+# Inspect each found script
+grep -nE '^export [A-Z_]+=/[a-z]' rootfs/<script-path>
+```
+
+- [ ] For each hardcoded export found: record the variable name and value.
+- [ ] Determine whether the snap wrapper can pre-set the variable to the correct
+  `$SNAP`/`$SNAP_COMMON` path **before** the entrypoint script runs:
+  - **Yes** → add an `override-build` `sed` step that rewrites
+    `export VAR=/path` → `export VAR="${VAR:-/path}"` so the wrapper's
+    pre-set value is honoured. See `references/override-steps-guide.md §5`.
+  - **No** (path used for a different purpose, or inside a conditional) →
+    investigate layout or wrapper `cd` to the expected directory.
 
 ---
 

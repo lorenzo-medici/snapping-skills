@@ -115,6 +115,28 @@ After a successful `docker-to-snap --suppress-build` run, the output folder cont
 
 After extraction, set the working context for subsequent phases to `<output-folder>/`.
 
+> **⚠️ `/dev` tree:** The extracted `rootfs/dev/` may contain device stubs and
+> dangling symlinks (e.g. `dev/stdout → fd/1 → /proc/self/fd/1`) that are live
+> pseudo-terminal FIFOs at extraction time. The generated `snapcraft.yaml`
+> includes an `override-pull:` step that copies the rootfs with `cp -a` (symlinks
+> verbatim, no dereferencing) then removes `rootfs/dev/` before snapcraft
+> processes it — this prevents a `SpecialFileError: ... is a named pipe` build
+> failure. snapd provides a correct `/dev` inside the sandbox at runtime.
+> Do **not** remove the `override-pull:` step from the generated recipe.
+
+> **⚠️ Entrypoint resolution:** Immediately after `docker-to-snap` completes,
+> verify the generated `library_wrapper.sh` contains a correct `ENTRYPOINT=`
+> path. Check:
+> ```bash
+> grep 'ENTRYPOINT=' <output-folder>/snap/local/library_wrapper.sh
+> ls rootfs/<that-path>    # must exist
+> ```
+> If `process.args[0]` is a cwd-relative path (e.g. `./entrypoint.sh`),
+> `create_wrapper.sh` searches the container PATH and falls back to
+> `process.cwd + entrypoint name` if not found there. If the resolved path does
+> not exist in `rootfs/`, replace `library_wrapper.sh` with a custom wrapper
+> that sets the correct path directly.
+
 ---
 
 ## Example commands

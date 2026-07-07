@@ -44,8 +44,8 @@ and `ambient`, find the row below and record:
 | Capability | Snap interface / construct | Notes |
 |---|---|---|
 | `CAP_KILL` | *(none — default within snap)* | Snaps may signal their own processes by default. Only add `process-control` if the app needs to signal processes **outside** its own snap |
-| `CAP_SETUID` | *(none — default within snap)* | Granted inside strict confinement for the snap's own child processes |
-| `CAP_SETGID` | *(none — default within snap)* | Same as `CAP_SETUID` |
+| `CAP_SETUID` | *(none — default within snap; `system-usernames` required for drops to a declared system user)* | Root-inside-snap can `setresuid` to a user declared in `system-usernames:` (e.g. `_daemon_`). The AppArmor profile grants `setresuid`/`setresgid` only for those declared users. Dropping to an arbitrary external UID without `system-usernames` will fail |
+| `CAP_SETGID` | *(none — default within snap; see `CAP_SETUID`)* | Same rules as `CAP_SETUID` |
 | `CAP_SETPCAP` | *(drop — usually not needed)* | Capability manipulation; rarely required outside privileged containers |
 | `CAP_SYS_PTRACE` | `process-control` | Only if app debugs/ptrace's other processes |
 | `CAP_SYS_NICE` | `process-control` | For changing scheduling priority |
@@ -58,7 +58,7 @@ and `ambient`, find the row below and record:
 |---|---|---|
 | `CAP_DAC_OVERRIDE` | *(drop — usually not needed in strict snap)* | Bypass file permission checks; not grantable via standard interface |
 | `CAP_DAC_READ_SEARCH` | *(drop — use layouts instead)* | If needed only to read specific files, use snap `layout` to expose them |
-| `CAP_CHOWN` | *(none — default within snap)* | Available for snap-owned files |
+| `CAP_CHOWN` | *(restricted under strict confinement — use `chmod` instead)* | Root inside a strict snap **cannot** `chown` files to a different UID/GID; the AppArmor profile denies `CAP_CHOWN` for foreign UIDs. `chown _daemon_:root "$DIR"` silently fails or returns `Permission denied`. Use `chmod go+rwX` to grant a privilege-dropped user access to root-owned dirs. Ownership changes between snap-owned paths (root→root) work normally |
 | `CAP_FOWNER` | *(none — default within snap)* | Available for snap-owned files |
 | `CAP_FSETID` | *(none — default within snap)* | Set-UID/set-GID bits |
 | `CAP_MKNOD` | `device-control` | Create device nodes; requires store review |

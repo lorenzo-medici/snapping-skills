@@ -4,19 +4,21 @@ description: >
   Orchestrates Docker/OCI container packaging into a snap from Docker Hub URLs, image
   references, `docker save` tarballs, or pre-extracted `config.json` + `rootfs/`.
   Downloads images with skopeo, runs docker-to-snap, delegates confinement inference,
-  derives `--build-for` architecture from OCI metadata, patches `snapcraft.yaml`, then
-  invokes `snap-iteration-workflow` for devmode and strict validation.
+  derives `--build-for` architecture from OCI metadata, patches `snapcraft.yaml`, adds
+  operator configuration via configure and install hooks, then invokes
+  `snap-iteration-workflow` for devmode and strict validation.
   WHEN: OCI config to snap, container to snap, config.json snap packaging, docker save
   tarball to snap, docker image to snap, snap interfaces from OCI, snap layout from rootfs,
-  OCI architecture to snapcraft build-for, snap confinement from container image, mapping
-  container capabilities to snap interfaces, hardcoded paths in snap, snap layout directives,
-  convert OCI image to snap, analyze rootfs for snap, snap packaging from container,
-  docker-to-snap, Docker Hub URL to snap, download container image for snap.
+  OCI architecture to snapcraft build-for, snap confinement from container image,
+  convert OCI image to snap, snap packaging from container, docker-to-snap,
+  Docker Hub URL to snap, download container image for snap,
+  snap configure hook, snap install hook, snap configuration options, snapctl set get,
+  snapctl configure hook validation, snap config file wiring, snap operator configuration.
 license: "Apache-2.0"
 metadata:
   author: "Canonical"
   version: "2.4.0"
-  summary: "Docker/OCI image URL, tarball, or rootfs → snap with extraction, analysis, recipe patching, and confinement validation."
+  summary: "Docker/OCI image URL, tarball, or rootfs → snap with extraction, analysis, recipe patching, confinement validation, and operator configuration hooks."
   tags:
     - snap
     - snapcraft
@@ -746,6 +748,145 @@ lxc exec snap-test -- nsenter --mount=/run/snapd/ns/<consumer>.mnt \
 
 ---
 
+### Phase 4d — Snap configuration (configure hook, install hook, config-file wiring)
+
+> **Run this phase after Phase 4c (or after Phase 4b if there is no multi-snap
+> deployment) and before invoking `snap-iteration-workflow`.**
+
+Read `references/snap-config-guide.md` in full before starting this phase.
+
+#### 4d.1 — Identify configurable options
+
+Determine which application options to expose as snap config keys.  Use all
+available sources:
+
+- Docker Hub page / upstream documentation for the image
+- Environment variables listed in `config.json → process.env` (skip `PATH`,
+  `HOME`, `TERM`, locale variables — those are internal)
+- Config files found under `rootfs/etc/`
+- Any explicit instructions from the caller
+
+Classify each candidate using the table in
+`references/snap-config-guide.md §1.2`.  Expose options that operators
+legitimately need to tune (ports, log levels, worker counts, TLS paths).
+Do **not** expose internal paths, data directories (always `$SNAP_COMMON`), or
+debug flags.
+
+Choose snap config key names following the naming convention in
+`references/snap-config-guide.md §1.3`.
+
+#### 4d.2 — Add config-file support to the install hook
+
+If the application is configured via a config file:
+
+1. Check whether `snap/hooks/install` already exists (docker-to-snap generates
+   one for `/etc/hosts` advertisement).
+2. If it exists, **append** the additions from `assets/install-hook-additions.sh`
+   to the existing hook. Do not replace the existing content.
+3. If it does not exist, create `snap/hooks/install` using the template.
+4. Make the hook executable: `chmod +x snap/hooks/install`
+5. Choose between Option A (copy bundled default from `$SNAP`) and Option B
+   (generate minimal defaults) based on whether the image ships a usable default
+   config file under `rootfs/etc/<app>/`.
+
+See `references/snap-config-guide.md §3` for the full install hook guide.
+
+#### 4d.3 — Write the configure hook
+
+1. Create `snap/hooks/configure` from `assets/configure-hook-template.sh`.
+2. Replace all `<PLACEHOLDERS>` with actual key names, defaults, and allowed
+   values derived from step 4d.1.
+3. For each exposed option, implement:
+   - A `snapctl get <key>` read
+   - Input validation appropriate to the option type (port, enum, integer, path)
+   - A fallback default for when the key is unset
+4. Select the config-file format block (INI, YAML, JSON, env-file) that matches
+   the application's native format.  Delete the unused blocks.
+5. Add `snapctl restart <snap-name>.<app-name>` only if this is a daemon snap.
+6. Make the hook executable: `chmod +x snap/hooks/configure`
+
+See `references/snap-config-guide.md §4` for validation patterns and examples.
+
+#### 4d.4 — Wire the config file into the application invocation
+
+Determine how the application should be told to use the config file written by
+the hooks to `$SNAP_COMMON/config/<app>.conf`.  Follow the decision tree in
+`references/snap-config-guide.md §7`:
+
+- **CLI flag** (`--config` or equivalent): add via `APP_ARGS` environment
+  variable in `snapcraft.yaml`, or patch the wrapper script.
+- **Environment variable**: add to `environment:` in `snapcraft.yaml`.
+- **Hardcoded path with no redirect support**: add a layout entry binding
+  the hardcoded path to `$SNAP_COMMON/etc/<app>` and update the install hook
+  to create that directory.
+
+See `references/snap-config-guide.md §5` for wiring patterns.
+
+#### 4d.5 — Add the hooks stanza to snapcraft.yaml
+
+Add (or merge into the existing) `hooks:` section in `snapcraft.yaml`:
+
+```yaml
+hooks:
+  install:
+    plugs:
+      - network-control
+  configure:
+    plugs:
+      - network-control
+```
+
+`network-control` is required by the docker-to-snap-generated hook that writes
+`/etc/hosts`.  If no `/etc/hosts` advertisement is needed, the plugs list may
+be empty — but keep the stanza so snapd knows the hooks exist.
+
+Use `scripts/patch_snapcraft.py` if the `hooks:` section needs to be added
+programmatically (dry-run first):
+
+```bash
+# Example: verify the hooks stanza is present; if not, add it manually to
+# snapcraft.yaml since patch_snapcraft.py targets parts and apps.
+grep -q "^hooks:" snap/snapcraft.yaml \
+  || echo "WARNING: hooks: stanza missing from snapcraft.yaml — add it manually"
+```
+
+#### 4d.6 — Clean and verify
+
+After creating or modifying any hook file, clean the whole project before
+rebuilding (hooks live outside the parts system):
+
+```bash
+snapcraft clean --use-lxd
+snapcraft --use-lxd --build-for <target_arch>
+```
+
+After install, verify hook execution:
+
+```bash
+# Inside LXD test container
+snap install --dangerous --devmode <snap>.snap
+
+# Check install hook created the config file
+ls -la /var/snap/<snap-name>/common/config/
+
+# Test configure hook with a valid value
+snap set <snap-name> port=9090
+cat /var/snap/<snap-name>/common/config/<app>.conf   # must show port=9090
+
+# Test configure hook rejects invalid values
+snap set <snap-name> port=99999    # must fail
+snap set <snap-name> log-level=verbose  # must fail if not in allowed list
+```
+
+If `snap set` fails during testing due to a hook error, inspect the hook
+output:
+```bash
+snap logs <snap-name>
+journalctl -u snap.<snap-name>.hook.configure
+```
+
+---
+
 ### Phase 5 — Build, install, and iterative confinement validation
 
 When working with LXD for testing, volumes should not be used, only `lxc push` and `lxc pull`.
@@ -1039,6 +1180,7 @@ Return:
 | `references/override-steps-guide.md` | Pattern catalog: convert rootfs/prime mutations (patchelf, symlinks, chmod, sed, etc.) to override-build/override-prime steps (Phase 4b); dump-plugin ordering rule |
 | `references/content-interface-guide.md` | Cross-snap file sharing via the content interface: slot/plug definitions, double-bind warning, app-config patching, connection and verification (Phase 4c) |
 | `references/system-usernames-guide.md` | Non-root user handling: system-usernames YAML syntax, configurability detection, setpriv wrapper, ownership rules (Phase 1b) |
+| `references/snap-config-guide.md` | Operator configuration: identifying configurable options, configure hook with input validation, install hook default config creation, wiring config file into app invocation (Phase 4d) |
 | Skill: `analyze-binary-for-snapping` | Primary analysis path for plugs/layouts/unmappable paths |
 | Skill: `snap-iteration-workflow` | Build, install, devmode validation, strict confinement iteration, and final clean-rootfs reproducibility validation (Phases 5-6) |
 | `references/capability-interface-map.md` | Map runtime denial capabilities to snap interfaces; fallback capability mapping |
@@ -1048,6 +1190,8 @@ Return:
 | `scripts/ensure_dependencies.py` | Checks and installs local tool/Python dependencies needed by this skill |
 | `scripts/download_image.py` | Downloads Docker Hub URLs or image references as docker-archive tarballs |
 | `scripts/patch_snapcraft.py` | Applies plugs, layouts, and override steps to `snapcraft.yaml` |
+| `assets/configure-hook-template.sh` | Starter template for `snap/hooks/configure` with validation for common option types |
+| `assets/install-hook-additions.sh` | Additions to merge into `snap/hooks/install` to create default config file and set initial snap config keys |
 
 Quick lookup examples:
 
@@ -1063,4 +1207,6 @@ grep "CAP_AUDIT_WRITE" references/capability-interface-map.md
 grep "resolv.conf" references/mount-snap-map.md
 grep "RUNPATH" references/analysis-checklist.md
 grep "store-review" <snap-iteration-workflow-dir>/references/install-and-verify.md
+grep "snapctl get\|configure hook\|config file\|SNAP_COMMON" references/snap-config-guide.md
+grep "validation\|port\|log.level\|enum" references/snap-config-guide.md
 ```

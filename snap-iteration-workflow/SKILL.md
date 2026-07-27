@@ -162,7 +162,8 @@ snapcraft --use-lxd --build-for <target_arch>
 
 **Minimise rebuild time (reset only the changed part):**
 ```bash
-snapcraft clean <part-name> --use-lxd --build-for <target_arch>
+# NOTE: snapcraft clean does NOT accept --build-for in snapcraft 8/9 — omit it.
+snapcraft clean <part-name> --use-lxd
 snapcraft --use-lxd --build-for <target_arch>
 ```
 
@@ -311,7 +312,7 @@ recipe complete.
 
 5. **Rebuild from the clean rootfs and retest strict confinement:**
    ```bash
-   snapcraft clean <part-name> --use-lxd --build-for <target_arch>
+   snapcraft clean <part-name> --use-lxd
    snapcraft --use-lxd --build-for <target_arch>
    ```
    Install the rebuilt snap in the isolated test environment and repeat Phase 4

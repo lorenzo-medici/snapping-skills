@@ -66,6 +66,54 @@ in the build step (rare: e.g. deleting files that multiple parts contribute to
 
 ---
 
+## ⚠️ Ordering Rule for `dump` Plugin Parts: Mutations Go AFTER `craftctl default`
+
+> **Critical for the `oci-container` part and any other part using `plugin: dump`.**
+
+The `dump` plugin copies source files into `$CRAFT_PART_INSTALL` as part of
+`craftctl default`. Before `craftctl default` runs, `$CRAFT_PART_INSTALL` is
+**empty** — any `sed -i`, `chmod`, `rm`, or other mutation targeting files in
+`$CRAFT_PART_INSTALL` placed *before* `craftctl default` will silently do
+nothing because the target files do not yet exist.
+
+**Correct ordering:**
+```yaml
+override-build: |
+  # ... build scripts that operate on $CRAFT_PART_BUILD (populated from source) ...
+  "$CRAFT_PROJECT_DIR"/build_scripts/replace_absolute_symlinks.sh
+  "$CRAFT_PROJECT_DIR"/build_scripts/patch_interpreter.sh
+  "$CRAFT_PROJECT_DIR"/build_scripts/embed_rpath.sh
+  "$CRAFT_PROJECT_DIR"/build_scripts/create_wrapper.sh
+
+  # craftctl default copies $CRAFT_PART_BUILD → $CRAFT_PART_INSTALL
+  craftctl default
+
+  # Mutations on config files, nginx.conf, etc. go HERE — after craftctl default
+  # so $CRAFT_PART_INSTALL is fully populated.
+  CONF="$CRAFT_PART_INSTALL/etc/myapp/myapp.conf"
+  if [ -f "$CONF" ]; then
+    sed -i 's|/var/run/myapp|/var/snap/myapp/current/run|' "$CONF"
+  fi
+```
+
+**Wrong — mutation before craftctl default silently does nothing:**
+```yaml
+override-build: |
+  # BUG: $CRAFT_PART_INSTALL/etc/myapp/myapp.conf does not exist yet
+  sed -i 's|/var/run/myapp|/var/snap/myapp/current/run|' \
+    "$CRAFT_PART_INSTALL/etc/myapp/myapp.conf"
+  craftctl default  # copies files, but the sed already ran on a non-existent file
+```
+
+The `oci-container` build scripts (`replace_absolute_symlinks.sh`,
+`patch_interpreter.sh`, `embed_rpath.sh`, `create_wrapper.sh`) operate on
+`$CRAFT_PART_BUILD` (the unpacked source tree), which *is* populated before
+`craftctl default`. This is why they run before `craftctl default` in the
+generated template. Any **additional** config-file patches you add should be
+placed after `craftctl default`.
+
+---
+
 ## Pattern Catalog
 
 ### 1. ELF Interpreter Patching

@@ -52,7 +52,8 @@ Work through the phases in order.
 > snapcraft part runs (for example a `patch_scripts/*.sh`, `build_scripts/*.sh`,
 > or other helper invoked from `override-build:` / `override-prime:`), always
 > clean the affected part before rebuilding:
-> `snapcraft clean <part-name> --use-lxd --build-for <target_arch>`.
+> `snapcraft clean <part-name> --use-lxd`.
+> (`snapcraft clean` does **not** accept `--build-for` in snapcraft 8/9; omit it.)
 > Snapcraft can otherwise reuse the old staged script from the part cache.
 >
 > **Pre-build clean decision:** Before every `snapcraft` build, check the files
@@ -226,7 +227,12 @@ Ask the user for the following. Do not assume values for required parameters.
       change to a hook requires cleaning the whole project and deleting any stale
       LXD build instance before the next build:
       ```bash
-      snapcraft clean --use-lxd --build-for <target_arch>
+      snapcraft clean --use-lxd
+      # Note: snapcraft clean does NOT accept --build-for; omit it.
+      # If the LXD container state is inconsistent after a partial clean,
+      # find and reset it manually:
+      #   lxc list --all-projects | grep snapcraft-<snap-name>
+      #   lxc exec --project snapcraft <instance> -- rm -rf /root/parts /root/stage /root/prime
       ```
 
    Use the signals available before extraction to classify: the image's purpose
@@ -453,6 +459,10 @@ so they are captured as `override-build` steps in Phase 4b.
 
 - **1c.1 — Merged-/usr:** run `[ -L rootfs/bin ]`; if merged, use `usr/bin/` paths
   in `snapcraft.yaml` `command:` fields (not `bin/`), and watch for stage collisions.
+  If NOT merged (split-`/usr` — Alpine, RHEL, etc.), use `bin/library_wrapper.sh` as
+  the `command:` path; the `docker-to-snap` generator detects this automatically, but
+  verify if editing an existing recipe. See `references/glibc-compat-guide.md §1c.1`
+  for the full split-`/usr` countercase, including the exact pack error to watch for.
 - **1c.2 — glibc compatibility:** compare OCI vs base snap glibc versions. If they
   differ, **never** add `LD_LIBRARY_PATH` to `environment:` — use RPATH embedding
   via `embed_rpath.sh` instead. See `references/override-steps-guide.md §2`.
@@ -536,6 +546,17 @@ If the script fails:
 - Exit 3 — YAML parse error
 - Exit 4 — no `--plugs` or `--layout` provided
 
+> **Passing extra arguments to the entrypoint (`APP_ARGS`):** The generated
+> `library_wrapper.sh` expands `$APP_ARGS` as extra shell-split arguments
+> appended to the entrypoint just before `"$@"`. Use this in `environment:` to
+> supply a startup script path or fixed flag without patching the wrapper:
+> ```yaml
+> environment:
+>   APP_ARGS: $SNAP/app/server.js
+> ```
+> See `references/docker-to-snap-options.md` → "Runtime variable: APP_ARGS" for
+> details and the word-splitting caveat.
+
 ---
 
 ### Phase 4b — Encode rootfs modifications as override steps
@@ -618,11 +639,9 @@ After applying override steps, or after creating/editing any helper script that
 the part runs, clean only the affected part and rebuild:
 
 ```bash
-snapcraft clean oci-container --use-lxd --build-for <target_arch>
+snapcraft clean oci-container --use-lxd
 snapcraft --use-lxd --build-for <target_arch>
 ```
-
-Inspect `prime/` to confirm the mutation was applied:
 
 ```bash
 ldd prime/usr/bin/myapp              # ELF interpreter correct?
@@ -632,6 +651,92 @@ cat prime/etc/myapp/myapp.conf       # config mutations in place?
 
 Revert any manual `rootfs/` changes that are now covered by override steps, then
 rebuild a second time to confirm the snap still works from a clean rootfs.
+
+---
+
+### Phase 4c — Content interface for cross-snap file sharing (multi-snap deployments)
+
+> **Run this phase only if two or more snaps in the deployment need to share a
+> writable directory** — for example, a certificate manager writing certs that
+> a web server reads. Skip for single-snap deployments.
+
+Read `references/content-interface-guide.md` in full before proceeding.
+
+#### 4c.1 — Identify shared directories
+
+From the Docker Compose volumes (or equivalent) determine:
+- Which snap **owns and writes** the directory (the slot/provider)
+- Which snap(s) **read or write** the directory (the plug/consumer)
+- The classic path each app expects (e.g. `/etc/letsencrypt`)
+
+#### 4c.2 — Add slots to the provider snap
+
+In the provider's `snapcraft.yaml`, declare a content slot for each shared
+directory. The slot exposes `$SNAP_COMMON/<subpath>`:
+
+```yaml
+slots:
+  <slot-name>:
+    interface: content
+    content: <content-label>   # arbitrary but unique label
+    write:
+      - $SNAP_COMMON/<subpath>
+```
+
+Create the shared directories in the provider's install hook:
+```bash
+mkdir -p "$SNAP_COMMON/<subpath>"
+```
+
+#### 4c.3 — Add plugs to the consumer snap
+
+In the consumer's `snapcraft.yaml`, declare a content plug for each slot. The
+plug mounts the provider's `$SNAP_COMMON/<subpath>` at the consumer's own
+`$SNAP_COMMON/<subpath>`:
+
+```yaml
+plugs:
+  <plug-name>:
+    interface: content
+    content: <content-label>   # must match the slot's content: value exactly
+    target: $SNAP_COMMON/<subpath>
+    # Do NOT set default-provider when building in LXD — it triggers a snap
+    # store install that fails for locally-built snaps.
+
+apps:
+  entrypoint:
+    plugs:
+      - <plug-name>
+```
+
+#### 4c.4 — Patch the consumer's app config to use $SNAP_COMMON paths
+
+> **Do not add a layout for the same path that a content plug's `target`
+> resolves to.** The layout and content bind mounts are applied in sequence;
+> a layout bound before the content interface mount will point at an empty
+> initial snapshot of the target directory. See
+> `references/content-interface-guide.md` → "Double-Bind Warning".
+
+Instead, patch the application's config file at build time to reference the
+`$SNAP_COMMON` path directly. Add an `override-build` step **after**
+`craftctl default`:
+
+```yaml
+override-build: |
+  craftctl default
+  CONF="$CRAFT_PART_INSTALL/etc/myapp/myapp.conf"
+  sed -i 's|/classic/path|/var/snap/<snap-name>/common/<subpath>|g' "$CONF"
+```
+
+#### 4c.5 — Connect and verify after install
+
+```bash
+snap connect <consumer>:<plug-name> <provider>:<slot-name>
+snap restart <consumer>
+# Verify from inside the consumer's namespace:
+lxc exec snap-test -- nsenter --mount=/run/snapd/ns/<consumer>.mnt \
+  find /var/snap/<consumer>/common/<subpath> -type f
+```
 
 ---
 
@@ -674,10 +779,16 @@ Apply the clean decision strictly:
 
 ```bash
 # Affected part known
-snapcraft clean <part-name> --use-lxd --build-for <target_arch>
+# Note: snapcraft clean does NOT accept --build-for in snapcraft 8/9; omit it.
+snapcraft clean <part-name> --use-lxd
 
 # Fallback when the affected part is unclear
-snapcraft clean --use-lxd --build-for <target_arch>
+snapcraft clean --use-lxd
+
+# If the LXD container state is inconsistent (e.g. after a partial manual clean),
+# reset it directly:
+#   lxc list --all-projects | grep snapcraft-<snap-name>
+#   lxc exec --project snapcraft <instance> -- rm -rf /root/parts /root/stage /root/prime
 
 snapcraft --use-lxd --build-for <target_arch>
 ```
@@ -864,7 +975,7 @@ the active rootfs:
 ```bash
 mv rootfs rootfs_edited
 mv rootfs_original rootfs
-snapcraft clean oci-container --use-lxd --build-for <target_arch>
+snapcraft clean oci-container --use-lxd
 snapcraft --use-lxd --build-for <target_arch>
 ```
 
@@ -919,7 +1030,8 @@ Return:
 |---|---|
 | `references/docker-to-snap-options.md` | Options, defaults, filename inference rules, and example commands for Phase 0c tarball extraction |
 | `references/glibc-compat-guide.md` | Merged-/usr detection and glibc compatibility checks; when to avoid LD_LIBRARY_PATH (Phase 1c) |
-| `references/override-steps-guide.md` | Pattern catalog: convert rootfs/prime mutations (patchelf, symlinks, chmod, sed, etc.) to override-build/override-prime steps (Phase 4b) |
+| `references/override-steps-guide.md` | Pattern catalog: convert rootfs/prime mutations (patchelf, symlinks, chmod, sed, etc.) to override-build/override-prime steps (Phase 4b); dump-plugin ordering rule |
+| `references/content-interface-guide.md` | Cross-snap file sharing via the content interface: slot/plug definitions, double-bind warning, app-config patching, connection and verification (Phase 4c) |
 | `references/system-usernames-guide.md` | Non-root user handling: system-usernames YAML syntax, configurability detection, setpriv wrapper, ownership rules (Phase 1b) |
 | Skill: `analyze-binary-for-snapping` | Primary analysis path for plugs/layouts/unmappable paths |
 | Skill: `snap-iteration-workflow` | Build, install, devmode validation, strict confinement iteration, and final clean-rootfs reproducibility validation (Phases 5-6) |
@@ -938,6 +1050,8 @@ grep "store-prefix" references/docker-to-snap-options.md
 grep "merged-usr\|glibc\|LD_LIBRARY_PATH" references/glibc-compat-guide.md
 grep "patchelf" references/override-steps-guide.md
 grep "symlink" references/override-steps-guide.md
+grep "dump plugin\|craftctl default\|PART_INSTALL" references/override-steps-guide.md
+grep "double.bind\|content.*slot\|content.*plug\|APP_ARGS" references/content-interface-guide.md
 grep "setpriv\|_daemon_\|snap_daemon" references/system-usernames-guide.md
 grep "CAP_AUDIT_WRITE" references/capability-interface-map.md
 grep "resolv.conf" references/mount-snap-map.md

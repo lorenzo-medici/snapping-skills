@@ -20,7 +20,9 @@ counterparts.
   in `snapcraft.yaml` must use the `usr/bin/` path (e.g. `command: usr/bin/library_wrapper.sh`),
   not `bin/library_wrapper.sh`.
 - `create_wrapper.sh` detects this automatically and places the wrapper at
-  `usr/bin/library_wrapper.sh`. No manual change needed if using the template.
+  `usr/bin/library_wrapper.sh`. The `docker-to-snap` generator also detects
+  merged-`/usr` at generation time and writes the correct `command:` path —
+  no manual change needed if using the generated template.
 - Watch for `stage collision` build errors where a part installs into `bin/`
   but the `bin → usr/bin` symlink is already in the stage directory.
 - **`env-exporter-bash` part staging collision:** The `env-exporter-bash` part
@@ -34,6 +36,24 @@ counterparts.
 
   The `docker-to-snap` template already uses `usr/bin/env-exporter.sh`; verify
   the generated `snapcraft.yaml` uses this path if you customise the template.
+
+**If NOT merged `/usr` (split-`/usr` — Alpine Linux, RHEL/CentOS, older distros):**
+- `/bin` is a real directory, not a symlink.
+- `create_wrapper.sh` detects this and places the wrapper at `bin/library_wrapper.sh`.
+- The `docker-to-snap` generator also detects split-`/usr` and writes
+  `command: bin/library_wrapper.sh` in the generated `snapcraft.yaml`.
+- **If you are working with a manually edited or pre-existing `snapcraft.yaml`**
+  that was originally generated for a merged-`/usr` image and now targets a
+  split-`/usr` image (or vice versa), you must update `command:` manually:
+  ```yaml
+  # split-/usr (Alpine, RHEL, etc.)
+  command: bin/library_wrapper.sh
+  # merged-/usr (Debian Bookworm+, Ubuntu 24.04+)
+  command: usr/bin/library_wrapper.sh
+  ```
+- The build will succeed but `snap pack` will fail with:
+  > `snap is unusable due to missing files: path "usr/bin/library_wrapper.sh" does not exist`
+  if the `command:` path does not match the actual wrapper location.
 
 ---
 

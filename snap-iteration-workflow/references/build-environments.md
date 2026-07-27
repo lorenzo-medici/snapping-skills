@@ -30,14 +30,28 @@ snapcraft --use-lxd --build-for <target_arch>
 snapcraft --use-lxd --build-for <target_arch>
 
 # Selective clean of a single part (does not destroy the container)
-snapcraft clean <part-name> --use-lxd --build-for <target_arch>
+# NOTE: snapcraft clean does NOT accept --build-for in snapcraft 8/9 — omit it.
+snapcraft clean <part-name> --use-lxd
 
 # Full clean (destroys LXD container — resets all caches)
-snapcraft clean --use-lxd --build-for <target_arch>
+# NOTE: same — no --build-for on clean.
+snapcraft clean --use-lxd
 
 # Drop into build container for interactive debugging
 snapcraft --use-lxd --build-for <target_arch> --shell         # before build steps
 snapcraft --use-lxd --build-for <target_arch> --shell-after   # after build steps
+```
+
+**If `snapcraft clean` does not fully reset the LXD container state** (e.g. after
+a partial manual clean that left inconsistent state), find and reset the container
+directly:
+```bash
+# Find the build instance name
+lxc list --all-projects | grep snapcraft-<snap-name>
+
+# Manually remove the build artefacts inside the container
+lxc exec --project snapcraft <instance-name> -- \
+  rm -rf /root/parts /root/stage /root/prime
 ```
 
 **Cross-architecture builds (amd64 host building arm64):**
@@ -74,7 +88,8 @@ the snap.
 
 **Key pain points:**
 - Forgetting `--use-lxd` can cause snapcraft to use an unsupported non-LXD backend
-- `snapcraft clean` nukes the LXD container — use `snapcraft clean <part-name>` for selective resets
+- `snapcraft clean` (without a part name) nukes the LXD container — use `snapcraft clean <part-name> --use-lxd` for selective resets
+- `snapcraft clean` does **not** accept `--build-for` in snapcraft 8/9 — the flag is only valid on `snapcraft` (build), not `clean`
 - The `snappy-env` part fetches from GitHub on every container rebuild; pin with a local source override during heavy iteration:
   ```yaml
   env-exporter-bash:
@@ -202,7 +217,8 @@ Is this a cross-architecture build? (target arch ≠ host arch)
 **Between iterative builds (don't full-clean unless necessary):**
 ```bash
 # Only reset the part that changed
-snapcraft clean oci-container --use-lxd --build-for <target_arch>
+# NOTE: snapcraft clean does NOT accept --build-for — omit it.
+snapcraft clean oci-container --use-lxd
 snapcraft --use-lxd --build-for <target_arch>
 ```
 

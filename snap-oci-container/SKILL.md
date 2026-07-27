@@ -27,6 +27,12 @@ metadata:
 
 # OCI -> Snap
 
+> **Orchestrated alternative.** This skill is the standalone, monolithic OCI→snap path.
+> For a decomposed, file-contract pipeline (analyze → package → validate → patch loop) that
+> also handles OCI input, use the `snap-orchestrator` skill, which selects
+> `snap-oci-analyzer` for container input. Both remain valid; this one is best for a
+> single-shot, direct conversion.
+
 Convert a Docker/OCI container into a snap — starting from a Docker Hub URL,
 image reference, `docker save` tarball, or pre-extracted `config.json` + `rootfs/`
 — without repeating analysis already covered by `analyze-binary-for-snapping`.

@@ -15,7 +15,7 @@ description: >
 license: "Apache-2.0"
 metadata:
   author: "Canonical"
-  version: "2.3.0"
+  version: "2.4.0"
   summary: "Docker/OCI image URL, tarball, or rootfs → snap with extraction, analysis, recipe patching, and confinement validation."
   tags:
     - snap

@@ -16,7 +16,7 @@ description: >
 license: "Apache-2.0"
 metadata:
   author: "Canonical"
-  version: "2.0.7"
+  version: "2.1.0"
   summary: "End-to-end snap packaging iteration: build → install → run → verify → confinement hardening, with environment isolation enforcement."
   tags:
     - snap

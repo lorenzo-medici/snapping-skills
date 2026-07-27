@@ -28,6 +28,11 @@ metadata:
 
 # Snap Iteration Workflow
 
+> **Note.** `snap-orchestrator` now ports this skill's devmode-first install, ELF-crash
+> diagnosis, arch-aware environments, and rootfs reproducibility check into
+> `snap-validator`. Use this standalone workflow for direct/manual iteration; use
+> `snap-orchestrator` for the automated pipeline.
+
 ## Overview
 
 This skill guides through the repeatable snap packaging iteration cycle — from setting

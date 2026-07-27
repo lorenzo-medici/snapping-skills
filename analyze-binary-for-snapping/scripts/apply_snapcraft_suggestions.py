@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-apply_snapcraft_suggestions.py — Adds inferred plugs and layouts to an existing snapcraft.yaml.
+apply_snapcraft_suggestions.py — Adds plugs, layouts, and override steps to an
+                                 existing snapcraft.yaml.
+
+This is the consolidated snapcraft.yaml patcher: a single implementation shared with
+`snap-packager/scripts/patch_snapcraft.py` (the pipeline's canonical mutator). The
+older plugs/layouts-only variant has been folded into this superset — the plugs/layout
+CLI surface and exit codes 0–3 are unchanged, exit code 4 now also fires for
+override-only invocations, and codes 5/6 are added for the `--part`/`--override-*` flags
+(which never trigger unless those flags are used). Step 7 of this skill calls it with the
+same `--snapcraft/--app/--plugs/--layout/--dry-run` arguments as before.
 
 Usage:
     python3 scripts/apply_snapcraft_suggestions.py \\
@@ -10,24 +19,47 @@ Usage:
         --layout /var/lib/myapp '$SNAP_COMMON/myapp' \\
         --layout /usr/lib/mylib '$SNAP/lib/mylib'
 
+    # Add override-build commands to a part (encodes rootfs modifications):
+    python3 scripts/apply_snapcraft_suggestions.py \\
+        --snapcraft snap/snapcraft.yaml \\
+        --part oci-container \\
+        --override-build "patchelf --set-interpreter \\$SNAPCRAFT_PART_INSTALL/lib/ld.so \\$SNAPCRAFT_PART_INSTALL/usr/bin/myapp" \\
+        --override-build "chmod 755 \\$SNAPCRAFT_PART_INSTALL/usr/bin/myapp"
+
 Options:
-    --snapcraft PATH    Path to snapcraft.yaml (auto-detected if omitted)
-    --app NAME          App to add plugs to (uses first app found if omitted)
-    --plugs NAME ...    One or more snap interface names to add as plugs
-    --layout PATH BIND  Add a layout entry binding PATH to BIND (repeatable)
-    --dry-run           Print the patched YAML without writing to disk
-    --no-backup         Skip creating the .bak backup file
+    --snapcraft PATH       Path to snapcraft.yaml (auto-detected if omitted)
+    --app NAME             App to add plugs to (uses first app found if omitted)
+    --plugs NAME ...       One or more snap interface names to add as plugs
+    --layout PATH BIND     Add a layout entry binding PATH to BIND (repeatable)
+    --part NAME            Part name to add override steps to (required with --override-*)
+    --override-build CMD   Shell command to append to override-build for --part (repeatable)
+    --override-prime CMD   Shell command to append to override-prime for --part (repeatable)
+    --dry-run              Print the patched YAML without writing to disk
+    --no-backup            Skip creating the .bak backup file
 
 Exit codes:
     0  Success (or --dry-run completed)
     1  snapcraft.yaml not found or unreadable
     2  Named --app not found in snapcraft.yaml
     3  YAML parse error
-    4  Missing required arguments (need at least --plugs or --layout)
+    4  Missing required arguments (need at least --plugs, --layout, --override-build,
+       or --override-prime)
+    5  Named --part not found in the parts section of snapcraft.yaml
+    6  --override-build or --override-prime used without --part
 
 Layout target paths that violate the snapcraft layouts specification are
 skipped with a WARNING rather than causing a hard failure. Forbidden paths
 are listed in references/layout-constraints.md.
+
+Override steps:
+    --override-build appends shell commands after snapcraftctl build in the named
+    part's override-build key.  --override-prime does the same for override-prime.
+    snapcraftctl build / snapcraftctl prime are inserted automatically if not already
+    present.  Commands already present in the step are skipped (idempotent).
+
+    See references/override-steps-guide.md for pattern examples covering ELF
+    interpreter patching, symlink creation, permission changes, config mutations,
+    and more.
 
 WARNING: this script uses PyYAML which does not preserve comments or custom
          formatting. A .bak backup is created before writing by default.
@@ -75,6 +107,19 @@ except ImportError:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _make_block_scalar(text: str):
+    """
+    Return *text* wrapped in a ruamel.yaml LiteralScalarString so that it is
+    serialised with the ``|`` block style.  Falls back to a plain str when
+    ruamel.yaml is not available (PyYAML renders multi-line strings as block
+    scalars automatically when they contain newlines).
+    """
+    if _ruamel_available:
+        from ruamel.yaml.scalarstring import LiteralScalarString
+        return LiteralScalarString(text)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +314,82 @@ def patch(data: dict, app_name: str | None, plugs: list[str], layouts: list[tupl
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# Override-step patch logic
 # ---------------------------------------------------------------------------
+
+_OVERRIDE_CTL_CALL = {
+    "override-build": "snapcraftctl build",
+    "override-prime": "snapcraftctl prime",
+}
+
+
+def patch_override_steps(
+    data: dict,
+    part_name: str,
+    override_build_cmds: list[str],
+    override_prime_cmds: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Append shell commands to the override-build / override-prime keys of *part_name*.
+
+    For each override key:
+      - If the key does not exist, create it with ``snapcraftctl build`` (or
+        ``snapcraftctl prime``) as the first line, followed by the new commands.
+      - If the key already exists, ensure the snapcraftctl call is present as
+        the first line, then append only the commands not already present.
+
+    Returns (added_build_cmds, added_prime_cmds) — commands actually inserted.
+    Commands already present in the step are silently skipped (idempotent).
+    """
+    parts = data.get("parts")
+    if not parts:
+        print("ERROR: snapcraft.yaml has no 'parts' section.", file=sys.stderr)
+        sys.exit(5)
+
+    if part_name not in parts:
+        available = ", ".join(parts.keys())
+        print(
+            f"ERROR: Part '{part_name}' not found in snapcraft.yaml.\n"
+            f"  Available parts: {available}",
+            file=sys.stderr,
+        )
+        sys.exit(5)
+
+    part = parts[part_name]
+
+    def _apply(cmds: list[str], step_key: str) -> list[str]:
+        """Apply *cmds* to *step_key* in *part*.  Returns commands actually added."""
+        if not cmds:
+            return []
+        ctl_call = _OVERRIDE_CTL_CALL[step_key]
+        existing_raw: str | None = part.get(step_key)
+
+        if existing_raw is None:
+            # Create fresh step: ctl call first, then all new commands.
+            lines = [ctl_call] + cmds
+            part[step_key] = _make_block_scalar("\n".join(lines) + "\n")
+            return list(cmds)
+
+        # Parse existing step and append missing commands.
+        existing_lines = existing_raw.splitlines()
+        # Ensure snapcraftctl call is the first line.
+        if ctl_call not in existing_lines:
+            existing_lines.insert(0, ctl_call)
+
+        added: list[str] = []
+        for cmd in cmds:
+            if cmd not in existing_lines:
+                existing_lines.append(cmd)
+                added.append(cmd)
+            else:
+                print(f"INFO: override step command already present — skipping: {cmd!r}", file=sys.stderr)
+
+        part[step_key] = _make_block_scalar("\n".join(existing_lines) + "\n")
+        return added
+
+    added_build = _apply(override_build_cmds, "override-build")
+    added_prime = _apply(override_prime_cmds, "override-prime")
+    return added_build, added_prime
 
 class LayoutAction(argparse.Action):
     """Collect --layout PATH BIND pairs into a list of (path, bind) tuples."""
@@ -283,7 +402,7 @@ class LayoutAction(argparse.Action):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Patch snapcraft.yaml with OCI-derived plugs and layout entries.",
+        description="Patch snapcraft.yaml with OCI-derived plugs, layout entries, and override steps.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -299,6 +418,27 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Add a layout entry: --layout /dest $SNAP/src  (repeatable)",
     )
+    p.add_argument(
+        "--part",
+        metavar="NAME",
+        help="Part name to add override steps to (required with --override-build / --override-prime)",
+    )
+    p.add_argument(
+        "--override-build",
+        metavar="CMD",
+        action="append",
+        dest="override_build",
+        default=[],
+        help="Shell command to append to override-build for --part (repeatable)",
+    )
+    p.add_argument(
+        "--override-prime",
+        metavar="CMD",
+        action="append",
+        dest="override_prime",
+        default=[],
+        help="Shell command to append to override-prime for --part (repeatable)",
+    )
     p.add_argument("--dry-run", action="store_true", help="Print patched YAML without writing")
     p.add_argument("--no-backup", action="store_true", help="Skip .bak backup")
     return p.parse_args()
@@ -307,9 +447,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if not args.plugs and not args.layouts:
-        print("ERROR: Provide at least --plugs or --layout.", file=sys.stderr)
+    has_plugs_or_layouts = bool(args.plugs or args.layouts)
+    has_override = bool(args.override_build or args.override_prime)
+
+    if not has_plugs_or_layouts and not has_override:
+        print(
+            "ERROR: Provide at least one of --plugs, --layout, --override-build, or --override-prime.",
+            file=sys.stderr,
+        )
         sys.exit(4)
+
+    if has_override and not args.part:
+        print(
+            "ERROR: --part is required when using --override-build or --override-prime.\n"
+            "  Specify the snapcraft part that contains the rootfs source, e.g.:\n"
+            "    --part oci-container",
+            file=sys.stderr,
+        )
+        sys.exit(6)
 
     # Filter layout targets — invalid ones are warned and skipped.
     if args.layouts:
@@ -333,6 +488,9 @@ def main() -> None:
         )
 
     added_plugs, added_layouts = patch(data, args.app, args.plugs, args.layouts)
+    added_build_cmds, added_prime_cmds = patch_override_steps(
+        data, args.part, args.override_build, args.override_prime
+    ) if has_override else ([], [])
 
     # Serialise
     import io
@@ -356,9 +514,17 @@ def main() -> None:
     # Report
     print(f"SUCCESS: Patched {snapcraft_path}")
     if added_plugs:
-        print(f"  Added plugs:   {', '.join(added_plugs)}")
+        print(f"  Added plugs:            {', '.join(added_plugs)}")
     if added_layouts:
-        print(f"  Added layouts: {', '.join(added_layouts)}")
+        print(f"  Added layouts:          {', '.join(added_layouts)}")
+    if added_build_cmds:
+        print(f"  Added override-build:   {len(added_build_cmds)} command(s) to part '{args.part}'")
+        for cmd in added_build_cmds:
+            print(f"    + {cmd}")
+    if added_prime_cmds:
+        print(f"  Added override-prime:   {len(added_prime_cmds)} command(s) to part '{args.part}'")
+        for cmd in added_prime_cmds:
+            print(f"    + {cmd}")
     skipped_plugs = [p for p in args.plugs if p not in added_plugs]
     skipped_layouts = [d for d, _ in args.layouts if d not in added_layouts]
     if skipped_plugs:

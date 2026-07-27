@@ -261,7 +261,10 @@ Authoritative allow/deny rules for snap layout targets.
 Ready-to-merge snippet template for `apps.<app>.plugs` and `layout:` sections.
 
 ### scripts/apply_snapcraft_suggestions.py
-Deterministic patcher that adds plugs/layouts to an existing `snapcraft.yaml`.
+Deterministic patcher that adds plugs/layouts to an existing `snapcraft.yaml`. This is the
+consolidated superset shared with `snap-packager`'s `patch_snapcraft.py` (single canonical
+logic — it also supports `--part`/`--override-build`/`--override-prime`, unused by Step 7).
+The plugs/layout CLI and exit codes 0–3 are unchanged; Step 7's invocation is unaffected.
 
 ## Constraints
 

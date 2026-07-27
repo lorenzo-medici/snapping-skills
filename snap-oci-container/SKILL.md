@@ -1192,6 +1192,7 @@ Return:
 | `scripts/patch_snapcraft.py` | Applies plugs, layouts, and override steps to `snapcraft.yaml` |
 | `assets/configure-hook-template.sh` | Starter template for `snap/hooks/configure` with validation for common option types |
 | `assets/install-hook-additions.sh` | Additions to merge into `snap/hooks/install` to create default config file and set initial snap config keys |
+| `assets/snapcraft-snippet-template.yaml` | Ready-to-merge plugs/layout/hooks snippet plus a wrapper-script example (Phases 1b/4a/4b/4d) |
 
 Quick lookup examples:
 
